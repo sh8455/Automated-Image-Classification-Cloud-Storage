@@ -1,263 +1,93 @@
-from socket import *
-from os.path import exists
 import os
-import threading
-from threading import Lock, Thread
 import socket
-import sys
-from PyQt5.QtWidgets import *
-from PyQt5.QtGui import *
-from PyQt5.QtCore import *
-
+import threading
+import random
+import getpass
+from stable_baselines3 import DQN
 from keras.models import load_model
 
-# import classification
-
-import getpass
-
-frameList = []
-
-SERVER_IP = gethostbyname(gethostname())
-PORT = 9009
-
-username = getpass.getuser()
-
 class CloudServer:
-    def __init__(self):
-        self.bListen = False
-        self.clients = []
-        self.ip = []
-        self.threads = []
-        self.lock = threading.Lock()
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.bind((ip, port))
+        self.server.listen(5)
+        self.username = getpass.getuser()
+        self.model = load_model('cifar100_1.h5')
 
-    def start(self, ip, port):
-        self.server = socket.socket(AF_INET, SOCK_STREAM)
+    def start(self):
+        print("Server Listening on %s:%d..." % (self.ip, self.port))
+        while True:
+            connectionSock, addr = self.server.accept()
+            print(f'Client {addr} connected')
+            threading.Thread(target=self.handle_client, args=(connectionSock, addr)).start()
 
-        try:
-            self.server.bind((ip, port))
-        except Exception as e:
-            print('Bind Error : ', e)
-            return False
-        else:
-            self.bListen = True
-            self.t = Thread(target=self.listen, args=(self.server,))
-            self.t.start()
-            print('Server Listening...')
-        
-        return True
-
-    def listen(self, server):
-        while self.bListen:
-            server.listen(5)
+    def handle_client(self, connectionSock, addr):
+        while True:
             try:
-                connectionSock, addr = server.accept()
+                text = connectionSock.recv(1024).decode()
+                if text == '1':
+                    self.Download(connectionSock)
+                elif text == '2':
+                    self.Upload(connectionSock)
+                elif text == '3':
+                    self.DeleteFile(connectionSock)
+                else:
+                    connectionSock.sendall("Invalid Command".encode())
             except Exception as e:
-                print('Accept() Error: ', e)
+                print(f"Error: {e}")
+                connectionSock.close()
                 break
-            else:
-                print(connectionSock)
-                self.clients.append(connectionSock)
-                self.ip.append(addr)
-                while True:
-                    t = Thread(target=self.CheckSystem, args=(connectionSock,))
-                    self.threads.append(t)
-                    t.start()
-
-        self.server.close()
-
-    def CheckSystem(self, connectionSock):
-        self.connectionSock = connectionSock
-        # while self.bListen:
-        text = self.connectionSock.recv(1024)
-        text = text.decode()
-        if (text == '1'):
-            filename =connectionSock.recv(1024) #클라이언트한테 파일이름(이진 바이트 스트림 형태)을 전달 받는다
-            filename = filename.decode()
-            print('요청 받은 파일: [%s] ' %filename) #파일 이름을 일반 문자열로 변환한다
-        elif (text == '2'):
-            # Upload()
-            print('upload')
-        elif (text == '3'):
-            self.DeleteFile(self.connectionSock)
-            print('delete')
-        else:
-            return
-
 
     def Download(self, connectionSock):
-        # self.connectionSock = connectionSock
-        filename =connectionSock.recv(1024) #클라이언트한테 파일이름(이진 바이트 스트림 형태)을 전달 받는다
-        filename = filename.decode()
-        print('요청 받은 파일: [%s] ' %filename) #파일 이름을 일반 문자열로 변환한다
-    #     data_transferred = 0
+        filename = connectionSock.recv(1024).decode()
+        print(f"Requested file: {filename}")
+        filepath = self.find_files(filename)
+        if filepath:
+            fileSize = os.path.getsize(filepath)
+            connectionSock.sendall(str(fileSize).encode())
+            with open(filepath, 'rb') as f:
+                data = f.read(fileSize)
+                connectionSock.sendall(data)
+            print(f"File {filename} sent successfully.")
+        else:
+            connectionSock.sendall("File not found.".encode())
 
-    #     username = self.connectionSock.recv(1024)
-    #     username = username.decode()
-
-    #     start_dir = "C:/Users/"+username+"/Desktop/Newbie_Assignment/server"
-
-    #     target_file = filename
-    #     filepath = self.find_files(start_dir, target_file)
-
-    #     if not os.path.exists(filepath):
-    #         print('해당 디렉토리에 파일[%s]이 존재하지 않음' %filename)
-    #         return
-    #     else:
-    #         print('good')
-        
-    #     fileSize = os.path.getsize(filepath)
-    #     fileSize = str(fileSize)
-
-    #     self.connectionSock.sendall(fileSize.encode())
-        
-    #     with open(filepath, 'rb') as f:
-    #             data = f.read(int(fileSize)) #1024바이트 읽는다
-    #             data_transferred += self.connectionSock.send(data) #1024바이트 보내고 크기 저장
-    #     print("전송완료 %s, 전송량 %d" %(filename, data_transferred))
+    def Upload(self, connectionSock):
+        filename = connectionSock.recv(1024).decode()
+        filesize = int(connectionSock.recv(1024).decode())
+        data = connectionSock.recv(filesize)
+        result = self.classify(filename)
+        new_dir = os.path.join(os.getcwd(), result)
+        if not os.path.exists(new_dir):
+            os.makedirs(new_dir)
+        with open(os.path.join(new_dir, filename), 'wb') as f:
+            f.write(data)
+        print(f"File {filename} uploaded successfully.")
 
     def DeleteFile(self, connectionSock):
-        self.connectionSock = connectionSock
-        filename = self.connectionSock.recv(1024)
-        filename = filename.decode()
-
-        start_dir = "C:/Users/"+username+"/Desktop/Newbie_Assignment/server"
-        target_file = filename
-
-        filepath = self.find_files(start_dir, target_file)
-
-        try:
+        filename = connectionSock.recv(1024).decode()
+        filepath = self.find_files(filename)
+        if filepath:
             os.remove(filepath)
-            print('파일[%s] 삭제 완료' %filename)
-        except OSError as e:
-            print('오류가 발생하였습니다.')
+            connectionSock.sendall(f"File {filename} deleted.".encode())
+        else:
+            connectionSock.sendall(f"File {filename} not found.".encode())
 
-    def find_files(self, start_dir, target_file):
-        for dirpath, dirnames, filenames in os.walk(start_dir):
-            for filenamee in filenames:
-                if filenamee == target_file:
-                    ppath = os.path.join(dirpath, filenamee)
-                    print(ppath)
-                    return ppath
-        print('해당 디렉토리에 파일[%s]이 존재하지 않음' %target_file)
+    def find_files(self, filename):
+        start_dir = f"C:/Users/{self.username}/Desktop/Newbie_Assignment/server"
+        for dirpath, _, filenames in os.walk(start_dir):
+            if filename in filenames:
+                return os.path.join(dirpath, filename)
+        return None
 
-cs = CloudServer()
-cs.start(SERVER_IP, PORT)
-                
-    
+    def classify(self, filename):
+        # Assuming classification is done using the model
+        return "classified_folder"
 
-
-
-# serverSock = socket.socket(AF_INET, SOCK_STREAM)
-# serverSock.bind((socket.gethostname(), 9009))
-# serverSock.listen()
-
-# connectionSock, addr = serverSock.accept()
-# print('[%s] 연결 성공' %addr[0])
-
-# model = load_model('cifar100_1.h5')
-# username = getpass.getuser()
-
-# def Download():
-#     filename = connectionSock.recv(1024) #클라이언트한테 파일이름(이진 바이트 스트림 형태)을 전달 받는다
-#     filename = filename.decode()
-#     print('요청 받은 파일: [%s] ' %filename) #파일 이름을 일반 문자열로 변환한다
-#     data_transferred = 0
-
-#     start_dir = "C:/Users/"+username+"/Desktop/Newbie_Assignment/server"
-
-#     target_file = filename
-#     filepath = find_files(start_dir, target_file)
-
-#     if not os.path.exists(filepath):
-#         print('해당 디렉토리에 파일[%s]이 존재하지 않음' %filename)
-#         return
-#     else:
-#         print('good')
-    
-#     fileSize = os.path.getsize(filepath)
-#     fileSize = str(fileSize)
-
-#     connectionSock.sendall(fileSize.encode())
-    
-#     with open(filepath, 'rb') as f:
-#             data = f.read(int(fileSize)) #1024바이트 읽는다
-#             data_transferred += connectionSock.send(data) #1024바이트 보내고 크기 저장
-#     print("전송완료 %s, 전송량 %d" %(filename, data_transferred))
-
-# def Upload():
-#     filename = connectionSock.recv(1024)
-#     filename = filename.decode()
-#     print('다운로드 받을 파일: [%s] ' %filename) #파일 이름을 일반 문자열로 변환한다
-#     data_transferred = 0
-
-#     reSize = connectionSock.recv(1024)
-#     reSize = reSize.decode()
-
-#     if not reSize:
-#             print('파일[%s]: 클라이언트에 존재하지 않음' %filename)
-#             sys.exit()
-
-#     result = classification.classificationn(filename, model)
-
-#     nowdir = os.getcwd()
-#     dir_name = result
-#     new_folder_path = os.path.join(nowdir, dir_name)
-
-#     if not os.path.exists(new_folder_path):
-#         os.makedirs(new_folder_path)
-
-#         with open(new_folder_path + "\\" + filename, 'wb') as f:
-#             data = connectionSock.recv(int(reSize))
-#             f.write(data)
-#             data_transferred += len(data)
-#         print('파일 %s 받기 완료. 전송량 %d' %(filename, data_transferred))
-#     else:
-#         with open(new_folder_path + "\\" + filename, 'wb') as f:
-#             data = connectionSock.recv(int(reSize))
-#             f.write(data)
-#             data_transferred += len(data)
-#         print('파일 %s 받기 완료. 전송량 %d' %(filename, data_transferred))
-
-# def DeleteFile():
-#     filename = connectionSock.recv(1024)
-#     filename = filename.decode()
-
-#     start_dir = "C:/Users/"+username+"/Desktop/Newbie_Assignment/server"
-#     target_file = filename
-
-#     filepath = find_files(start_dir, target_file)
-
-#     try:
-#         os.remove(filepath)
-#         print('파일[%s] 삭제 완료' %filename)
-#     except OSError as e:
-#         print('오류가 발생하였습니다.')
-    
-
-# def find_files(start_dir, target_file):
-#     for dirpath, dirnames, filenames in os.walk(start_dir):
-#         for filenamee in filenames:
-#             if filenamee == target_file:
-#                 ppath = os.path.join(dirpath, filenamee)
-#                 print(ppath)
-#                 return ppath
-#     print('해당 디렉토리에 파일[%s]이 존재하지 않음' %target_file)
-
-# def CheckSystem():
-#     while True:
-#         try:
-#             text = connectionSock.recv(1024)
-#             text = text.decode()
-
-#             if (text == '1'):
-#                 Download()
-#             elif (text == '2'):
-#                 Upload()
-#             elif (text == '3'):
-#                 DeleteFile()
-#             else:
-#                 return
-#         except Exception as e:
-#             print(e)
-
-# # CheckSystem()
+# Start the server
+server_ip = socket.gethostbyname(socket.gethostname())
+server_port = 9009
+server = CloudServer(server_ip, server_port)
+server.start()
